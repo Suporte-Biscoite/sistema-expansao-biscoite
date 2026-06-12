@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
-import { LogIn, Plus, X, MapPin, Save, LogOut, Search, Navigation, Bell, Eye, EyeOff, AlertCircle, ChevronDown, ChevronUp, Loader2 } from 'lucide-react';
+import { LogIn, Plus, X, MapPin, Save, LogOut, Search, Navigation, Bell, Eye, EyeOff, AlertCircle, ChevronDown, ChevronUp, Loader2, Pencil, Crosshair } from 'lucide-react';
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
 import { supabase } from './supabase';
@@ -75,20 +75,18 @@ export default function App() {
   const [toast, setToast] = useState({ show: false, title: '', message: '' });
   const [resetTrigger, setResetTrigger] = useState(0);
 
-  // Controle da Gaveta
   const [isListExpanded, setIsListExpanded] = useState(true);
 
-  // Estados Login
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [loginError, setLoginError] = useState('');
 
   const [novoPonto, setNovoPonto] = useState({
-    nome: '', cidade: '', regiao: 'Sudeste', tipo: 'Shopping Center', status: 'Disponível', lat: '', lng: ''
+    id: null, nome: '', cidade: '', regiao: 'Sudeste', tipo: 'Shopping Center', status: 'Disponível', endereco: '', cep: '', lat: '', lng: ''
   });
+  const [isBuscandoCoordenadas, setIsBuscandoCoordenadas] = useState(false);
 
-  // --- BUSCA OS PONTOS DO SUPABASE AO CARREGAR ---
   useEffect(() => {
     const fetchLocais = async () => {
       setLoading(true);
@@ -99,7 +97,7 @@ export default function App() {
 
       if (error) {
         console.error('Erro ao carregar pontos:', error);
-        showNotification('Erro', 'Não foi possível carregar os pontos do mapa.');
+        showNotification('Erro', 'Não foi possível carregar os pontos do banco de dados.');
       } else {
         setLocais(data || []);
       }
@@ -108,36 +106,6 @@ export default function App() {
 
     fetchLocais();
   }, []);
-
-  const resetTotem = useCallback(() => {
-    setBusca('');
-    setMapCenter(null);
-    setShowLogin(false);
-    setShowModal(false);
-    setIsListExpanded(true); 
-    setResetTrigger(prev => prev + 1); 
-  }, []);
-
-  useEffect(() => {
-    let timeoutId;
-    const resetTimer = () => {
-      clearTimeout(timeoutId);
-      timeoutId = setTimeout(resetTotem, 120000); 
-    };
-
-    window.addEventListener('touchstart', resetTimer);
-    window.addEventListener('mousemove', resetTimer);
-    window.addEventListener('click', resetTimer);
-    
-    resetTimer();
-
-    return () => {
-      clearTimeout(timeoutId);
-      window.removeEventListener('touchstart', resetTimer);
-      window.removeEventListener('mousemove', resetTimer);
-      window.removeEventListener('click', resetTimer);
-    };
-  }, [resetTotem]);
 
   const handleLogin = (e) => { 
     e.preventDefault(); 
@@ -149,8 +117,34 @@ export default function App() {
     }
   };
 
-  // --- SALVA NOVO PONTO NO SUPABASE ---
-  const handleAddPonto = async (e) => {
+  const handleGeocode = async () => {
+    if (!novoPonto.cidade || !novoPonto.endereco) {
+      showNotification("Atenção", "Preencha a Cidade e o Endereço para buscar.");
+      return;
+    }
+    
+    setIsBuscandoCoordenadas(true);
+    showNotification("Buscando no satélite...", "Isso pode levar alguns segundos.");
+
+    try {
+      const query = encodeURIComponent(`${novoPonto.endereco}, ${novoPonto.cidade}, ${novoPonto.cep}, Brasil`);
+      const response = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${query}`);
+      const dataNominatim = await response.json();
+
+      if (dataNominatim && dataNominatim.length > 0) {
+        setNovoPonto(prev => ({ ...prev, lat: dataNominatim[0].lat, lng: dataNominatim[0].lon }));
+        showNotification("Encontrado!", "Coordenadas preenchidas. Ajuste se necessário.");
+      } else {
+        showNotification("Não Encontrado", "O satélite não achou esse endereço exato. Você pode salvar sem o mapa ou digitar as coordenadas manualmente.");
+      }
+    } catch (error) {
+      showNotification("Erro", "Falha de conexão com o satélite.");
+    } finally {
+      setIsBuscandoCoordenadas(false);
+    }
+  };
+
+  const handleSavePonto = async (e) => {
     e.preventDefault();
     setSaving(true);
 
@@ -160,37 +154,74 @@ export default function App() {
       regiao: novoPonto.regiao,
       tipo: novoPonto.tipo,
       status: novoPonto.status,
-      lat: parseFloat(novoPonto.lat),
-      lng: parseFloat(novoPonto.lng),
+      endereco: novoPonto.endereco,
+      cep: novoPonto.cep,
+      lat: novoPonto.lat ? parseFloat(novoPonto.lat) : null,
+      lng: novoPonto.lng ? parseFloat(novoPonto.lng) : null,
     };
 
-    const { data, error } = await supabase
-      .from('pontos_expansao')
-      .insert([pontoParaSalvar])
-      .select()
-      .single();
+    let responseData;
+    let errorObj;
+
+    if (novoPonto.id) {
+      const { data, error } = await supabase.from('pontos_expansao').update(pontoParaSalvar).eq('id', novoPonto.id).select().single();
+      responseData = data;
+      errorObj = error;
+    } else {
+      const { data, error } = await supabase.from('pontos_expansao').insert([pontoParaSalvar]).select().single();
+      responseData = data;
+      errorObj = error;
+    }
 
     setSaving(false);
 
-    if (error) {
-      console.error('Erro ao salvar ponto:', error);
-      showNotification('Erro', 'Não foi possível salvar o ponto.');
+    if (errorObj) {
+      console.error('Erro ao salvar:', errorObj);
+      showNotification('Erro do Banco', 'Ocorreu um erro ao conectar com o banco de dados.');
       return;
     }
 
-    setLocais(prev => [data, ...prev]);
+    if (novoPonto.id) {
+      setLocais(prev => prev.map(p => p.id === novoPonto.id ? responseData : p));
+      showNotification("Atualizado", `${responseData.nome} foi modificado.`);
+    } else {
+      setLocais(prev => [responseData, ...prev]);
+      showNotification("Sucesso", `${responseData.nome} salvo na nuvem!`);
+    }
+
     setShowModal(false);
-    setNovoPonto({ nome: '', cidade: '', regiao: 'Sudeste', tipo: 'Shopping Center', status: 'Disponível', lat: '', lng: '' });
-    showNotification("Sucesso", `${data.nome} adicionado e salvo.`);
-    setMapCenter([data.lat, data.lng]);
-    setMapZoom(16);
-    setIsListExpanded(false); 
+    
+    if (responseData.lat && responseData.lng) {
+      setMapCenter([responseData.lat, responseData.lng]);
+      setMapZoom(16);
+    }
+    setIsListExpanded(false);
+  };
+
+  const handleEditClick = (local) => {
+    setNovoPonto({
+      id: local.id,
+      nome: local.nome || '',
+      cidade: local.cidade || '',
+      regiao: local.regiao || 'Sudeste',
+      tipo: local.tipo || 'Shopping Center',
+      status: local.status || 'Disponível',
+      endereco: local.endereco || '',
+      cep: local.cep || '',
+      lat: local.lat || '',
+      lng: local.lng || ''
+    });
+    setShowModal(true);
   };
 
   const handleLocationClick = (local) => {
-    setMapCenter([local.lat, local.lng]);
-    setMapZoom(16);
-    setIsListExpanded(false); 
+    if (local.lat && local.lng) {
+      setMapCenter([local.lat, local.lng]);
+      setMapZoom(16);
+      setIsListExpanded(false); 
+    } else {
+      showNotification("Sem Mapa", "Este ponto ainda não tem coordenadas cadastradas.");
+    }
   };
 
   const showNotification = (title, message) => {
@@ -215,7 +246,10 @@ export default function App() {
         
         {isLoggedIn ? (
           <div className="flex gap-2 xl:gap-4">
-            <button onClick={() => setShowModal(true)} className="bg-b-primary text-b-dark px-4 py-2 xl:px-6 xl:py-4 rounded-xl xl:rounded-2xl font-bold text-xs xl:text-sm flex items-center gap-2 shadow-lg shadow-b-primary/20 hover:bg-b-secondary transition-all">
+            <button onClick={() => {
+              setNovoPonto({ id: null, nome: '', cidade: '', regiao: 'Sudeste', tipo: 'Shopping Center', status: 'Disponível', endereco: '', cep: '', lat: '', lng: '' });
+              setShowModal(true);
+            }} className="bg-b-primary text-b-dark px-4 py-2 xl:px-6 xl:py-4 rounded-xl xl:rounded-2xl font-bold text-xs xl:text-sm flex items-center gap-2 shadow-lg shadow-b-primary/20 hover:bg-b-secondary transition-all">
               <Plus size={20} /> <span className="hidden sm:block">NOVO PONTO</span>
             </button>
             <button onClick={() => setIsLoggedIn(false)} className="bg-white/5 text-b-secondary p-2 xl:p-4 rounded-xl xl:rounded-2xl border border-b-primary/30 hover:bg-red-500/10 hover:text-red-400 transition-all">
@@ -260,10 +294,10 @@ export default function App() {
 
           <div className="p-4 xl:p-6 bg-white/5 shrink-0">
             <div className="relative">
-              <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-b-secondary/60" size={20} />
+              <Search className="absolute left-4 xl:left-5 top-1/2 -translate-y-1/2 text-b-secondary/60" size={20} />
               <input 
                 type="text" placeholder="Buscar shopping..." 
-                className="w-full pl-12 p-3 xl:p-4 bg-b-dark border border-b-primary/40 rounded-xl xl:rounded-2xl text-sm xl:text-lg text-b-light focus:outline-none focus:border-b-secondary transition-all"
+                className="w-full py-3 pr-3 pl-12 xl:py-4 xl:pr-4 xl:pl-14 bg-b-dark border border-b-primary/40 rounded-xl xl:rounded-2xl text-sm xl:text-lg text-b-light focus:outline-none focus:border-b-secondary transition-all"
                 value={busca} 
                 onChange={(e) => setBusca(e.target.value)}
               />
@@ -282,21 +316,38 @@ export default function App() {
                 <div 
                   key={local.id} 
                   onClick={() => handleLocationClick(local)}
-                  className="p-4 xl:p-5 border border-b-primary/20 rounded-xl cursor-pointer bg-white/5 hover:bg-white/10 active:bg-b-primary/20 transition-all flex flex-col gap-1 xl:gap-2 group"
+                  className="p-4 xl:p-5 border border-b-primary/20 rounded-xl cursor-pointer bg-white/5 hover:bg-white/10 active:bg-b-primary/20 transition-all flex flex-col gap-1 xl:gap-2 group relative"
                 >
                   <div className="flex justify-between items-center mb-1">
-                    <span className="text-[10px] xl:text-[12px] font-bold px-2 xl:px-3 py-1 bg-b-dark text-b-secondary rounded-lg border border-b-primary/30">
-                      {local.regiao}
-                    </span>
-                    <span className="text-[9px] xl:text-[11px] font-bold px-2 xl:px-3 py-1 rounded-lg uppercase tracking-wider" style={{
-                      backgroundColor: local.status === 'Alta Prioridade' ? '#E8439320' : local.status === 'Em Negociação' ? '#E8B84B20' : '#2ecc7120',
-                      color: local.status === 'Alta Prioridade' ? '#E84393' : local.status === 'Em Negociação' ? '#E8B84B' : '#2ecc71',
-                      border: `1px solid ${local.status === 'Alta Prioridade' ? '#E8439350' : local.status === 'Em Negociação' ? '#E8B84B50' : '#2ecc7150'}`
-                    }}>
-                      {local.status}
-                    </span>
+                    <div className="flex gap-2 items-center">
+                      <span className="text-[10px] xl:text-[12px] font-bold px-2 xl:px-3 py-1 bg-b-dark text-b-secondary rounded-lg border border-b-primary/30">
+                        {local.regiao}
+                      </span>
+                      <span className="text-[9px] xl:text-[11px] font-bold px-2 xl:px-3 py-1 rounded-lg uppercase tracking-wider" style={{
+                        backgroundColor: local.status === 'Alta Prioridade' ? '#E8439320' : local.status === 'Em Negociação' ? '#E8B84B20' : '#2ecc7120',
+                        color: local.status === 'Alta Prioridade' ? '#E84393' : local.status === 'Em Negociação' ? '#E8B84B' : '#2ecc71',
+                        border: `1px solid ${local.status === 'Alta Prioridade' ? '#E8439350' : local.status === 'Em Negociação' ? '#E8B84B50' : '#2ecc7150'}`
+                      }}>
+                        {local.status}
+                      </span>
+                    </div>
+                    
+                    {/* BOTÃO DE EDITAR NA LISTA LATERAL */}
+                    {isLoggedIn && (
+                      <button 
+                        onClick={(e) => {
+                          e.stopPropagation(); // Impede o clique de mover o mapa
+                          handleEditClick(local);
+                        }}
+                        className="p-2 bg-b-dark/50 hover:bg-b-primary/20 text-b-secondary hover:text-b-light rounded-lg transition-all"
+                        title="Editar Ponto"
+                      >
+                        <Pencil size={16} />
+                      </button>
+                    )}
                   </div>
-                  <h4 className="font-bold text-b-light text-base xl:text-xl group-hover:text-white transition-colors">{local.nome}</h4>
+
+                  <h4 className="font-bold text-b-light text-base xl:text-xl group-hover:text-white transition-colors pr-8">{local.nome}</h4>
                   <p className="text-xs xl:text-sm text-b-secondary flex items-center gap-1"><MapPin size={14}/> {local.cidade}</p>
                 </div>
               ))
@@ -316,7 +367,7 @@ export default function App() {
         )}
 
         {/* MAPA PRINCIPAL */}
-        <main className="flex-1 relative z-0 h-full w-full">
+        <main className="flex-1 relative z-0 h-full w-full bg-b-dark">
           <MapContainer 
             center={[-15.79, -47.88]} 
             zoom={5} 
@@ -329,7 +380,8 @@ export default function App() {
             <TileLayer url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png" />
             <MapController coords={mapCenter} zoom={mapZoom} resetTrigger={resetTrigger} />
 
-            {locais.map(local => (
+            {/* Renderiza apenas os locais que possuem coordenadas */}
+            {locais.filter(l => l.lat != null && l.lng != null).map(local => (
               <Marker key={local.id} position={[local.lat, local.lng]} icon={pinIcons[local.status] || pinIcons['Disponível']}>
                 <Popup autoPan={false}>
                   <div className="w-72 xl:w-80 bg-b-dark rounded-3xl overflow-hidden shadow-2xl border border-b-primary/40 font-sans flex flex-col">
@@ -344,26 +396,21 @@ export default function App() {
                     </div>
                     <div className="p-4 xl:p-5">
                       <h3 className="font-bold text-lg xl:text-xl text-b-light leading-tight mb-2">{local.nome}</h3>
-                      <p className="text-xs xl:text-sm text-b-secondary flex items-center gap-2 mb-4 xl:mb-5"><MapPin size={16}/> {local.cidade}</p>
+                      <p className="text-xs xl:text-sm text-b-secondary flex items-center gap-2 mb-4"><MapPin size={16}/> {local.cidade}</p>
                       
-                      {/* OS DOIS BOTÕES (GPS e STREET VIEW) */}
-                      <div className="flex gap-2">
-                        <a
-                          href={`https://www.google.com/maps/dir/?api=1&destination=${local.lat},${local.lng}`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="flex-1 py-3 bg-white/5 hover:bg-b-primary/20 text-b-secondary hover:text-white border border-b-primary/30 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1 xl:gap-2"
-                        >
-                          <Navigation size={16} /> GPS
+                      {/* BOTÕES DO POPUP */}
+                      <div className="grid grid-cols-2 gap-2 mt-2">
+                        <a href={`https://www.google.com/maps/dir/?api=1&destination=${local.lat},${local.lng}`} target="_blank" rel="noopener noreferrer" className="py-3 bg-white/5 hover:bg-b-primary/20 text-b-secondary hover:text-white border border-b-primary/30 rounded-xl text-[11px] font-bold transition-all flex items-center justify-center gap-1">
+                          <Navigation size={14} /> GPS
                         </a>
-                        <a
-                          href={`https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=${local.lat},${local.lng}`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="flex-1 py-3 bg-white/5 hover:bg-b-primary/20 text-b-secondary hover:text-white border border-b-primary/30 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1 xl:gap-2"
-                        >
-                          <Eye size={16} /> RUA (360º)
+                        <a href={`https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=${local.lat},${local.lng}`} target="_blank" rel="noopener noreferrer" className="py-3 bg-white/5 hover:bg-b-primary/20 text-b-secondary hover:text-white border border-b-primary/30 rounded-xl text-[11px] font-bold transition-all flex items-center justify-center gap-1">
+                          <Eye size={14} /> 360º
                         </a>
+                        {isLoggedIn && (
+                          <button onClick={() => handleEditClick(local)} className="col-span-2 py-3 bg-b-primary/10 hover:bg-b-primary/30 text-b-primary hover:text-white border border-b-primary/50 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2">
+                            <Pencil size={14} /> EDITAR PONTO
+                          </button>
+                        )}
                       </div>
 
                     </div>
@@ -405,22 +452,32 @@ export default function App() {
         </div>
       )}
 
+      {/* --- MODAL DE CADASTRO/EDIÇÃO --- */}
       {showModal && (
         <div className="fixed inset-0 bg-b-dark/90 backdrop-blur-md z-[3000] flex items-center justify-center p-4">
           <div className="bg-b-dark w-full max-w-2xl rounded-3xl shadow-2xl border border-b-primary/30 overflow-hidden max-h-[90vh] overflow-y-auto">
             <div className="bg-white/5 border-b border-b-primary/30 p-4 xl:p-6 text-b-light flex justify-between items-center sticky top-0 z-10 backdrop-blur-md">
-              <h3 className="text-lg xl:text-xl font-bold flex items-center gap-2 text-b-secondary"><MapPin size={20} /> Nova Praça</h3>
+              <h3 className="text-lg xl:text-xl font-bold flex items-center gap-2 text-b-secondary">
+                {novoPonto.id ? <Pencil size={20} /> : <MapPin size={20} />} 
+                {novoPonto.id ? 'Editar Ponto' : 'Nova Praça'}
+              </h3>
               <button onClick={() => setShowModal(false)} className="text-b-secondary hover:text-white transition-all"><X size={24}/></button>
             </div>
-            <form onSubmit={handleAddPonto} className="p-4 xl:p-8 grid grid-cols-1 xl:grid-cols-2 gap-4 xl:gap-6">
+            
+            <form onSubmit={handleSavePonto} className="p-4 xl:p-8 grid grid-cols-1 xl:grid-cols-2 gap-4 xl:gap-6 relative">
+              
+              {isBuscandoCoordenadas && (
+                <div className="absolute inset-0 bg-b-dark/80 backdrop-blur-sm z-50 flex flex-col items-center justify-center rounded-b-3xl">
+                  <div className="w-12 h-12 border-4 border-b-primary/30 border-t-b-primary rounded-full animate-spin mb-4"></div>
+                  <p className="text-b-light font-bold">Processando satélite...</p>
+                </div>
+              )}
+
               <div className="col-span-1 xl:col-span-2">
                 <label className="text-xs font-bold text-b-secondary uppercase mb-1 block">Nome do Local</label>
-                <input required value={novoPonto.nome} onChange={e => setNovoPonto({...novoPonto, nome: e.target.value})} type="text" className="w-full p-3 bg-white/5 border border-b-primary/30 text-b-light rounded-xl focus:border-b-secondary" />
+                <input required value={novoPonto.nome} onChange={e => setNovoPonto({...novoPonto, nome: e.target.value})} type="text" placeholder="Ex: Shopping Iguatemi" className="w-full p-3 bg-white/5 border border-b-primary/30 text-b-light rounded-xl focus:border-b-secondary" />
               </div>
-              <div className="col-span-1 xl:col-span-2">
-                <label className="text-xs font-bold text-b-secondary uppercase mb-1 block">Cidade e UF</label>
-                <input required value={novoPonto.cidade} onChange={e => setNovoPonto({...novoPonto, cidade: e.target.value})} type="text" className="w-full p-3 bg-white/5 border border-b-primary/30 text-b-light rounded-xl focus:border-b-secondary" />
-              </div>
+
               <div>
                 <label className="text-xs font-bold text-b-secondary uppercase mb-1 block">Região</label>
                 <select value={novoPonto.regiao} onChange={e => setNovoPonto({...novoPonto, regiao: e.target.value})} className="w-full p-3 bg-b-dark border border-b-primary/30 text-b-light rounded-xl focus:border-b-secondary">
@@ -431,15 +488,8 @@ export default function App() {
                   <option>Sul</option>
                 </select>
               </div>
+
               <div>
-                <label className="text-xs font-bold text-b-secondary uppercase mb-1 block">Tipo</label>
-                <select value={novoPonto.tipo} onChange={e => setNovoPonto({...novoPonto, tipo: e.target.value})} className="w-full p-3 bg-b-dark border border-b-primary/30 text-b-light rounded-xl focus:border-b-secondary">
-                  <option>Shopping Center</option>
-                  <option>Loja de Rua</option>
-                  <option>Ponto Estratégico</option>
-                </select>
-              </div>
-              <div className="col-span-1 xl:col-span-2">
                 <label className="text-xs font-bold text-b-secondary uppercase mb-1 block">Status Estratégico</label>
                 <select value={novoPonto.status} onChange={e => setNovoPonto({...novoPonto, status: e.target.value})} className="w-full p-3 bg-b-dark border border-b-primary/30 text-b-light rounded-xl focus:border-b-secondary">
                   <option value="Disponível">Disponível</option>
@@ -447,22 +497,50 @@ export default function App() {
                   <option value="Em Negociação">Em Negociação</option>
                 </select>
               </div>
-              <div>
-                <label className="text-xs font-bold text-b-secondary uppercase mb-1 block">Latitude</label>
-                <input required value={novoPonto.lat} onChange={e => setNovoPonto({...novoPonto, lat: e.target.value})} type="text" placeholder="-23.561" className="w-full p-3 bg-white/5 border border-b-primary/30 text-b-light rounded-xl focus:border-b-secondary" />
+
+              {/* BLOCO INTELIGENTE DE ENDEREÇO */}
+              <div className="col-span-1 xl:col-span-2 mt-2 pt-4 border-t border-b-primary/20">
+                <p className="text-b-primary font-bold text-sm mb-4 flex items-center gap-2"><Crosshair size={16}/> Inteligência de Endereço</p>
+                
+                <div className="grid grid-cols-2 gap-4 mb-4">
+                  <div>
+                    <label className="text-xs font-bold text-b-secondary uppercase mb-1 block">CEP</label>
+                    <input value={novoPonto.cep} onChange={e => setNovoPonto({...novoPonto, cep: e.target.value})} type="text" placeholder="00000-000" className="w-full p-3 bg-white/5 border border-b-primary/30 text-b-light rounded-xl focus:border-b-secondary" />
+                  </div>
+                  <div>
+                    <label className="text-xs font-bold text-b-secondary uppercase mb-1 block">Cidade e UF *</label>
+                    <input required value={novoPonto.cidade} onChange={e => setNovoPonto({...novoPonto, cidade: e.target.value})} type="text" placeholder="Ex: São Paulo - SP" className="w-full p-3 bg-white/5 border border-b-primary/30 text-b-light rounded-xl focus:border-b-secondary" />
+                  </div>
+                </div>
+                
+                <label className="text-xs font-bold text-b-secondary uppercase mb-1 block">Endereço (Rua e Número) *</label>
+                <div className="flex gap-2">
+                  <input required value={novoPonto.endereco} onChange={e => setNovoPonto({...novoPonto, endereco: e.target.value})} type="text" placeholder="Ex: Av. Faria Lima, 2232" className="flex-1 p-3 bg-white/5 border border-b-primary/30 text-b-light rounded-xl focus:border-b-secondary" />
+                  <button type="button" onClick={handleGeocode} className="bg-b-primary/20 text-b-primary hover:bg-b-primary hover:text-b-dark px-4 rounded-xl font-bold transition-colors text-xs whitespace-nowrap">
+                    BUSCAR MAPA
+                  </button>
+                </div>
               </div>
-              <div>
-                <label className="text-xs font-bold text-b-secondary uppercase mb-1 block">Longitude</label>
-                <input required value={novoPonto.lng} onChange={e => setNovoPonto({...novoPonto, lng: e.target.value})} type="text" placeholder="-46.656" className="w-full p-3 bg-white/5 border border-b-primary/30 text-b-light rounded-xl focus:border-b-secondary" />
+
+              {/* BLOCO DE COORDENADAS (NÃO É MAIS OBRIGATÓRIO) */}
+              <div className="col-span-1 xl:col-span-2 mt-2 pt-4 border-t border-b-primary/20">
+                <p className="text-b-secondary font-bold text-xs mb-3 uppercase tracking-wider">Ajuste Fino de Coordenadas (Opcional)</p>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="text-[10px] text-b-secondary mb-1 block">Latitude</label>
+                    <input value={novoPonto.lat} onChange={e => setNovoPonto({...novoPonto, lat: e.target.value})} type="text" placeholder="-23.561" className="w-full p-2 bg-b-dark border border-b-primary/30 text-b-light rounded-lg text-sm" />
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-b-secondary mb-1 block">Longitude</label>
+                    <input value={novoPonto.lng} onChange={e => setNovoPonto({...novoPonto, lng: e.target.value})} type="text" placeholder="-46.656" className="w-full p-2 bg-b-dark border border-b-primary/30 text-b-light rounded-lg text-sm" />
+                  </div>
+                </div>
               </div>
+
               <div className="col-span-1 xl:col-span-2 pt-2">
-                <button 
-                  type="submit" 
-                  disabled={saving}
-                  className="w-full bg-b-primary text-b-dark p-4 rounded-xl font-bold flex items-center justify-center gap-2 hover:bg-b-secondary transition-all shadow-lg disabled:opacity-60 disabled:cursor-not-allowed"
-                >
+                <button type="submit" disabled={saving} className="w-full bg-b-primary text-b-dark p-4 rounded-xl font-bold flex items-center justify-center gap-2 hover:bg-b-secondary transition-all shadow-lg disabled:opacity-50">
                   {saving ? <Loader2 size={20} className="animate-spin" /> : <Save size={20} />}
-                  {saving ? 'SALVANDO...' : 'ADICIONAR'}
+                  {saving ? 'SALVANDO...' : (novoPonto.id ? 'ATUALIZAR DADOS' : 'ADICIONAR')}
                 </button>
               </div>
             </form>
